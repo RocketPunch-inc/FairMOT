@@ -23,7 +23,7 @@ from tracking_utils.utils import mkdir_if_missing
 from opts import opts
 
 
-def write_results(filename, results, data_type):
+def write_results(filename, results, data_type, summary_in_and_out):
     if data_type == 'mot':
         save_format = '{frame},{id},{x1},{y1},{w},{h},1,-1,-1,-1\n'
     elif data_type == 'kitti':
@@ -42,6 +42,7 @@ def write_results(filename, results, data_type):
                 x2, y2 = x1 + w, y1 + h
                 line = save_format.format(frame=frame_id, id=track_id, x1=x1, y1=y1, x2=x2, y2=y2, w=w, h=h)
                 f.write(line)
+        f.write(summary_in_and_out)
     logger.info('save results to {}'.format(filename))
 
 
@@ -67,6 +68,16 @@ def write_results_score(filename, results, data_type):
     logger.info('save results to {}'.format(filename))
 
 
+def locate_people(d_people, ids, tlwhs):
+    """ Save a position of detected person. Only using y value(index 1 of ylwh).
+    """
+    for id_, tlwh in zip(ids, tlwhs):
+        if id_ not in d_people:
+            print(id_, tlwh)
+            d_people[id_] = [tlwh[1], tlwh[1]]  # first seen
+        d_people[id_][1] = tlwh[1]  # last seen
+
+
 def eval_seq(opt, dataloader, data_type, result_filename, save_dir=None, show_image=True, frame_rate=30, use_cuda=True):
     if save_dir:
         mkdir_if_missing(save_dir)
@@ -74,11 +85,12 @@ def eval_seq(opt, dataloader, data_type, result_filename, save_dir=None, show_im
     timer = Timer()
     results = []
     frame_id = 0
+    d_people = {}  # people of in and out
     #for path, img, img0 in dataloader:
     for i, (path, img, img0) in enumerate(dataloader):
         #if i % 8 != 0:
             #continue
-        if frame_id % 20 == 0:
+        if frame_id % 50 == 0:
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
 
         # run tracking
@@ -100,6 +112,7 @@ def eval_seq(opt, dataloader, data_type, result_filename, save_dir=None, show_im
                 online_ids.append(tid)
                 #online_scores.append(t.score)
         timer.toc()
+        locate_people(d_people, online_ids, online_tlwhs)
         # save results
         results.append((frame_id + 1, online_tlwhs, online_ids))
         #results.append((frame_id + 1, online_tlwhs, online_ids, online_scores))
@@ -111,9 +124,27 @@ def eval_seq(opt, dataloader, data_type, result_filename, save_dir=None, show_im
         if save_dir is not None:
             cv2.imwrite(os.path.join(save_dir, '{:05d}.jpg'.format(frame_id)), online_im)
         frame_id += 1
+
+    # check people in and out
+    summary_in_and_out = 'd_people: {}'.format(d_people)
+    y_borderline = int(480 * 0.3)  # 서울대점 4번 카메라 기준
+    count_in = 0
+    count_out = 0
+    for id_, seen in d_people.items():
+        first_seen, last_seen = seen
+        if first_seen <= y_borderline:  # 화면 위쪽, 들어온 사람이라고 간주함
+            if last_seen > y_borderline:  # 아래로 내려 온 경우
+                count_in += 1
+        else:
+            if last_seen <= y_borderline:  # 화면 아래쪽, 실내에 있던 사람이라고 간주함
+                count_out += 1
+    summary_in_and_out += '\n' + 'IN: {}, OUT: {}'.format(count_in, count_out)
+    logger.info(summary_in_and_out)
+
     # save results
-    write_results(result_filename, results, data_type)
+    write_results(result_filename, results, data_type, summary_in_and_out)
     #write_results_score(result_filename, results, data_type)
+
     return frame_id, timer.average_time, timer.calls
 
 
